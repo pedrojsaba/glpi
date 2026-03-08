@@ -4,6 +4,10 @@ FROM ghcr.io/glpi-project/glpi-development-env:$PHP_VERSION
 
 USER root
 
+# Install composer if not already present in the base image
+RUN command -v composer || \
+    (curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer)
+
 # Allow extra PHP configuration to be placed in a dedicated folder than can serve
 # as a volume
 ENV PHP_INI_SCAN_DIR "/usr/local/etc/php/conf.d/:/usr/local/etc/php/custom_conf.d/"

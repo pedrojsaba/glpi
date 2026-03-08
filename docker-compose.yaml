@@ -13,6 +13,8 @@ services:
       - "8880:80"
       - "8891:8090" # E2E test server
       - "9738:9637"
+    command: >-
+      bash -c "php bin/console dependencies install --no-interaction && apache2-foreground"
     environment:
       # By default the testing env is exposed under the 8080 internal port
       CYPRESS_BASE_URL: http://localhost:8880
