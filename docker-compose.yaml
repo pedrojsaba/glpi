@@ -13,28 +13,11 @@ services:
       - "8080:80"
       - "8090:8090" # E2E test server
       - "9637:9637"
-    depends_on:
-      - db
     environment:
       # By default the testing env is exposed under the 8080 internal port
       CYPRESS_BASE_URL: http://localhost:8080
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
-  db:
-    container_name: "glpi-db"
-    image: "mariadb:11.8"
-    restart: "unless-stopped"
-    volumes:
-      - "db:/var/lib/mysql"
-      - ".docker/initdb.sql:/docker-entrypoint-initdb.d/initdb.sql"
-    environment:
-      MARIADB_ROOT_PASSWORD: "glpi"
-      MARIADB_DATABASE: "glpi"
-      MARIADB_USER: "glpi"
-      MARIADB_PASSWORD: "glpi"
-    expose:
-      - "3306"
 
   mailpit:
     container_name: "glpi-mailpit"
@@ -51,14 +34,16 @@ services:
     restart: "unless-stopped"
     ports:
       - "9000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       CONNECTIONS: "glpi"
 
       LABEL_glpi: "GLPI Mysql Server"
-      SERVER_glpi: "db"
-      USER_glpi: "glpi"
-      PASSWORD_glpi: "glpi"
-      PORT_glpi: 3306
+      SERVER_glpi: "154.12.237.137"
+      USER_glpi: "glpi_db_poc"
+      PASSWORD_glpi: "${DB_PASSWORD}"
+      PORT_glpi: 33087
       ENGINE_glpi: "mysql@dbgate-plugin-mysql"
 
   # To create a preconfigured LDAP object in GLPI, run `make console c='tools:generate_dev_ldap'`
@@ -78,7 +63,6 @@ services:
       - "ldap_config:/etc/ldap/slapd.d/:rw"
 
 volumes:
-  db:
   custom_php_ini:
   ldap_files:
   ldap_config:

@@ -47,7 +47,7 @@ phpunit.xml
 phpstan.neon
 /.phpunit.result.cache
 *.phar
-.env
+# .env
 /resources/.illustrations_translations.php
 /phpunit/files/*
 /.dump/
