@@ -117,18 +117,21 @@ class Router
 
     /**
      * The request as it was received by the router (and after some very basic processing).
+     * @var ?Request
      * @internal Only intended to be used by tests
      */
     private ?Request $original_request = null;
 
     /**
      * The final state of the request after it was modified by the request middlewares.
+     * @var ?Request
      * @internal Only intended to be used by tests
      */
     private ?Request $final_request = null;
 
     /**
      * The last route that was matched and invoked.
+     * @var ?RoutePath
      * @internal Only intended to be used by tests
      */
     private ?RoutePath $last_invoked_route = null;
@@ -615,6 +618,41 @@ EOT;
         // Fill parameters from $_REQUEST
         foreach ($_REQUEST as $key => $value) {
             $request->setParameter($key, $value);
+        }
+
+        // Handle file uploads in multipart/form-data requests.
+        // Mirrors APIRest behavior: move files from PHP tmp dir to GLPI_TMP_DIR
+        // and expose them as _filename/_prefix_filename so Document::prepareInputForAdd() finds them.
+        if (!empty($_FILES)) {
+            $filenames = [];
+            $prefixes  = [];
+            foreach (array_keys($_FILES) as $fieldname) {
+                $rand_name = uniqid('', true);
+                if (is_array($_FILES[$fieldname]['name'])) {
+                    foreach ($_FILES[$fieldname]['name'] as &$name) {
+                        $name = $rand_name . $name;
+                    }
+                } else {
+                    $_FILES[$fieldname]['name'] = $rand_name . $_FILES[$fieldname]['name'];
+                }
+                $upload_result = \GLPIUploadHandler::uploadFiles([
+                    'name'           => $fieldname,
+                    'print_response' => false,
+                ]);
+                foreach ($upload_result as $uresult) {
+                    foreach ($uresult as $file_result) {
+                        if (isset($file_result->error)) {
+                            continue;
+                        }
+                        $filenames[] = $file_result->name;
+                        $prefixes[]  = $file_result->prefix;
+                    }
+                }
+            }
+            if (!empty($filenames)) {
+                $request->setParameter('_filename', $filenames);
+                $request->setParameter('_prefix_filename', $prefixes);
+            }
         }
 
         $request = $request->withQueryParams(array_merge($request->getQueryParams(), $_GET));

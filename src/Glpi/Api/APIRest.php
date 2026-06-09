@@ -42,12 +42,15 @@ namespace Glpi\Api;
 use AllAssets;
 use CommonDBTM;
 use Document;
+use GLPIKey;
 use GLPIUploadHandler;
 use ReflectionClass;
 use Safe\Exceptions\JsonException;
+use Safe\Exceptions\UrlException;
 use stdClass;
 use Toolbox;
 
+use function Safe\base64_decode;
 use function Safe\file_get_contents;
 use function Safe\json_decode;
 use function Safe\json_encode;
@@ -318,9 +321,9 @@ class APIRest extends API
                         $response = $this->getItems($itemtype, $this->parameters, $totalcount);
 
                         //add pagination headers
-                        $range = [0, $_SESSION['glpilist_limit']];
+                        $range = [0, $_SESSION['glpilist_limit'] - 1];
                         if (isset($this->parameters['range'])) {
-                            $range = explode("-", $this->parameters['range']);
+                            $range = \array_map('intval', explode("-", $this->parameters['range']));
                         }
 
                         // fix end range
@@ -409,7 +412,7 @@ class APIRest extends API
     {
 
         if (isset($this->url_elements[$index])) {
-            $all_assets = $all_assets && $this->url_elements[$index] == AllAssets::class;
+            $all_assets = $all_assets && $this->url_elements[$index] == AllAssets::getType();
             $valid_class = Toolbox::isCommonDBTM($this->url_elements[$index])
             || Toolbox::isAPIDeprecated($this->url_elements[$index]);
 
@@ -426,7 +429,7 @@ class APIRest extends API
 
                 // AllAssets
                 if ($all_assets) {
-                    return AllAssets::class;
+                    return AllAssets::getType();
                 }
 
                 // Load namespace for deprecated
@@ -616,7 +619,12 @@ class APIRest extends API
 
         // try to retrieve session_token in header
         if (isset($headers['Session-Token'])) {
-            $parameters['session_token'] = $headers['Session-Token'];
+            try {
+                $parameters['session_token'] = (new GLPIKey())->decrypt(base64_decode(trim($headers['Session-Token'])));
+            } catch (UrlException) {
+                // malformed session token, keep its raw value and let authentication code fail due to mismatch token
+                $parameters['session_token'] = $headers['Session-Token'];
+            }
         }
 
         // try to retrieve app_token in header

@@ -867,13 +867,13 @@ class ReportController extends AbstractController
             $result = [];
             if (isset($item['itemtype'])) {
                 $result['item'] = [
-                    'itemtype' => $param_item::class,
+                    'itemtype' => $param_item::getType(),
                     'id' => $item['id'],
                     'name' => Dropdown::getDropdownName($item['itemtype']::getTable(), $item['id'], false, true, true, ''),
                 ];
             } else {
                 $result['item'] = [
-                    'itemtype' => $param_item::class,
+                    'itemtype' => $param_item::getType(),
                     'id' => $item['id'],
                     'name' => $item['link'],
                 ];

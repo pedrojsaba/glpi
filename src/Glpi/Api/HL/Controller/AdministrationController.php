@@ -54,6 +54,7 @@ use Planning;
 use Profile;
 use Session;
 use Toolbox;
+use Profile_User;
 use User;
 use UserCategory;
 use UserEmail;
@@ -336,6 +337,10 @@ EOD,
                         'description' => 'Level',
                         'readOnly' => true,
                     ],
+                    'is_recursive' => [
+                        'type' => Doc\Schema::TYPE_BOOLEAN,
+                        'description' => 'Apply visibility to child entities',
+                    ],
                     'entity' => self::getDropdownTypeSchema(class: Entity::class, full_schema: 'Entity'),
                 ],
             ],
@@ -534,6 +539,44 @@ EOT,
                     ],
                     'user' => self::getDropdownTypeSchema(class: User::class, full_schema: 'User'),
                     'substitute' => self::getDropdownTypeSchema(class: User::class, field: 'users_id_substitute', full_schema: 'User'),
+                ],
+            ],
+            'UserAuthorization' => [
+                'x-version-introduced' => '2.2',
+                'x-itemtype' => Profile_User::class,
+                'type' => Doc\Schema::TYPE_OBJECT,
+                'properties' => [
+                    'id' => [
+                        'type' => Doc\Schema::TYPE_INTEGER,
+                        'format' => Doc\Schema::FORMAT_INTEGER_INT64,
+                        'description' => 'ID',
+                        'readOnly' => true,
+                    ],
+                    'profile' => [
+                        'type' => Doc\Schema::TYPE_OBJECT,
+                        'description' => 'Profile',
+                        'properties' => [
+                            'id'   => ['type' => Doc\Schema::TYPE_INTEGER, 'format' => Doc\Schema::FORMAT_INTEGER_INT64],
+                            'name' => ['type' => Doc\Schema::TYPE_STRING],
+                        ],
+                    ],
+                    'entity' => [
+                        'type' => Doc\Schema::TYPE_OBJECT,
+                        'description' => 'Entity',
+                        'properties' => [
+                            'id'   => ['type' => Doc\Schema::TYPE_INTEGER, 'format' => Doc\Schema::FORMAT_INTEGER_INT64],
+                            'name' => ['type' => Doc\Schema::TYPE_STRING],
+                        ],
+                    ],
+                    'is_recursive' => [
+                        'type' => Doc\Schema::TYPE_BOOLEAN,
+                        'description' => 'Apply recursively to sub-entities',
+                    ],
+                    'is_dynamic' => [
+                        'type' => Doc\Schema::TYPE_BOOLEAN,
+                        'description' => 'Assigned dynamically (e.g. by LDAP rules)',
+                        'readOnly' => true,
+                    ],
                 ],
             ],
         ];
@@ -1096,12 +1139,163 @@ EOT,
         return $this->getUserPictureResponse($data['name'], $data['picture']);
     }
 
+    /**
+     * Process picture upload for a user
+     * @param int $userId
+     * @param Request $request
+     * @return Response
+     */
+    private function processUserPictureUpload(int $userId, Request $request): Response
+    {
+        $user = new User();
+        if (!$user->getFromDB($userId)) {
+            return self::getNotFoundErrorResponse();
+        }
+
+        if (!$user->can($userId, UPDATE)) {
+            return self::getAccessDeniedErrorResponse();
+        }
+
+        // The HL API Router pre-processes all $_FILES via GLPIUploadHandler before reaching
+        // the controller, moving the file from PHP's tmp dir to GLPI_TMP_DIR and injecting
+        // _filename into the request parameters. When the request comes through the HL API,
+        // $_FILES['picture']['tmp_name'] no longer exists, so move_uploaded_file() would fail.
+        // We use the pre-processed path when available, and fall back to raw $_FILES for
+        // direct calls (e.g. the web interface) that do not go through the Router.
+        $routerFilenames = $request->getParameter('_filename');
+
+        if (!empty($routerFilenames)) {
+            $srcName = is_array($routerFilenames) ? $routerFilenames[0] : $routerFilenames;
+            $srcPath = GLPI_TMP_DIR . '/' . $srcName;
+            if (!file_exists($srcPath)) {
+                return self::getInvalidParametersErrorResponse(['missing' => ['picture']]);
+            }
+        } else {
+            $fileData = $_FILES['picture'] ?? null;
+            if (!$fileData || ($fileData['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+                return self::getInvalidParametersErrorResponse([
+                    'missing' => ['picture'],
+                ]);
+            }
+            $srcPath = $fileData['tmp_name'];
+            $srcName = $fileData['name'] ?? '';
+        }
+
+        // Detect actual image type from content (not filename) to handle cases where
+        // the client sends a WebP or other format with a mismatched extension (e.g. Freshdesk).
+        $actual_type = extension_loaded('exif') ? exif_imagetype($srcPath) : false;
+        $extension = match($actual_type) {
+            IMAGETYPE_JPEG => 'jpg',
+            IMAGETYPE_PNG  => 'png',
+            IMAGETYPE_GIF  => 'gif',
+            IMAGETYPE_BMP  => 'bmp',
+            IMAGETYPE_WEBP => 'webp',
+            default        => pathinfo($srcName, PATHINFO_EXTENSION) ?: 'png',
+        };
+        $filename = uniqid('pic_') . '.' . $extension;
+        $destPath = GLPI_TMP_DIR . '/' . $filename;
+
+        if (!empty($routerFilenames)) {
+            if (!rename($srcPath, $destPath)) {
+                return self::getCRUDErrorResponse(self::CRUD_ACTION_UPDATE);
+            }
+        } else {
+            if (!move_uploaded_file($srcPath, $destPath)) {
+                return self::getCRUDErrorResponse(self::CRUD_ACTION_UPDATE);
+            }
+        }
+
+        $input = [
+            'id' => $userId,
+            '_picture' => $filename,
+        ];
+
+        if ($user->update($input)) {
+            $user->getFromDB($userId);
+            return $this->getUserPictureResponse($user->fields['name'], $user->fields['picture']);
+        }
+
+        return self::getCRUDErrorResponse(self::CRUD_ACTION_UPDATE);
+    }
+
+    #[Route(path: '/User/Me/Picture', methods: ['POST', 'PUT'], scopes: ['user'])]
+    #[RouteVersion(introduced: '2.0')]
+    #[Doc\Route(
+        description: 'Upload a picture for the current user'
+    )]
+    public function addMyPicture(Request $request): Response
+    {
+        return $this->processUserPictureUpload($this->getMyUserID(), $request);
+    }
+
+    /**
+     * Maps the 'emails' array from the API request into the '_useremails' field expected by
+     * User::updateUserEmails() (called in post_addItem / post_updateItem).
+     * ResourceAccessor::getInputParamsBySchema() strips x-join fields, so we must inject them manually.
+     *
+     * Negative array keys are used so updateUserEmails() treats every entry as a new insertion
+     * (the method only updates existing records when the key is a positive integer matching a DB id).
+     * Emails already persisted for the user (when users_id is given) and within-request duplicates
+     * are silently skipped to prevent double entries.
+     *
+     * @param array<int, array{email?: string}|string> $emails
+     * @param array<string, mixed> $input
+     * @param int|null $users_id Existing user id; when provided, existing DB emails are excluded.
+     * @return array<string, mixed>
+     */
+    private function injectUserEmailsIntoInput(array $emails, array $input, ?int $users_id = null): array
+    {
+        // If we are updating a user and emails are provided, we delete existing ones.
+        // This is specifically requested for the API to avoid keeping old emails when "loading" new ones.
+        if ($users_id !== null) {
+            $userEmail = new UserEmail();
+            $userEmail->deleteByCriteria(['users_id' => $users_id], force: true);
+        }
+
+        $seen = [];
+        $new_index = -1;
+        foreach ($emails as $email_data) {
+            $email = trim(is_array($email_data) ? ($email_data['email'] ?? '') : (string) $email_data);
+            $normalized = strtolower($email);
+            if ($email !== '' && !isset($seen[$normalized])) {
+                $seen[$normalized] = true;
+                $index = $new_index--;
+                $input['_useremails'][$index] = $email;
+
+                if (is_array($email_data) && ($email_data['is_default'] ?? false)) {
+                    $input['_default_email'] = $index;
+                }
+            }
+        }
+        return $input;
+    }
+
     #[Route(path: '/User', methods: ['POST'])]
     #[RouteVersion(introduced: '2.0')]
     #[Doc\CreateRoute(schema_name: 'User')]
     public function createUser(Request $request): Response
     {
-        return ResourceAccessor::createBySchema($this->getKnownSchema('User', $this->getAPIVersion($request)), $request->getParameters(), [self::class, 'getUserByID']);
+        $params = $request->getParameters();
+        $schema = $this->getKnownSchema('User', $this->getAPIVersion($request));
+
+        if (!isset($params['entity']) && isset($_SESSION['glpiactive_entity'])) {
+            $params['entity'] = $_SESSION['glpiactive_entity'];
+        }
+
+        $input = ResourceAccessor::getInputParamsBySchema($schema, $params);
+
+        $item = new User();
+        if (!$item->can($item->getID(), CREATE, $input)) {
+            return self::getAccessDeniedErrorResponse();
+        }
+        $items_id = $item->add($input);
+
+        if ($items_id && isset($params['emails']) && is_array($params['emails'])) {
+            $update_input = $this->injectUserEmailsIntoInput($params['emails'], ['id' => (int)$items_id], (int)$items_id);
+            $item->update($update_input);
+        }
+
+        return self::getCRUDCreateResponse($items_id, self::getAPIPathForRouteFunction(self::class, 'getUserByID', ['id' => $items_id ?: 0]));
     }
 
     #[Route(path: '/User/{id}', methods: ['GET'], requirements: ['id' => '\d+'], middlewares: [ResultFormatterMiddleware::class])]
@@ -1158,12 +1352,56 @@ EOT,
         return $this->getUserPictureResponse($data['name'], $data['picture']);
     }
 
+    #[Route(path: '/User/{id}/Picture', methods: ['POST', 'PUT'], requirements: ['id' => '\d+'])]
+    #[RouteVersion(introduced: '2.0')]
+    #[Doc\Route(
+        description: 'Upload a picture for the given user'
+    )]
+    public function addUserPictureByID(Request $request): Response
+    {
+        return $this->processUserPictureUpload((int) $request->getAttribute('id'), $request);
+    }
+
+    #[Route(path: '/User/username/{username}/Picture', methods: ['POST', 'PUT'], requirements: ['username' => '[a-zA-Z0-9_]+'])]
+    #[RouteVersion(introduced: '2.0')]
+    #[Doc\Route(
+        description: 'Upload a picture for the given user by username'
+    )]
+    public function addUserPictureByUsername(Request $request): Response
+    {
+        $users_id = ResourceAccessor::getIDForOtherUniqueFieldBySchema($this->getKnownSchema('User', $this->getAPIVersion($request)), 'username', $request->getAttribute('username'));
+        if ($users_id === null) {
+            return self::getNotFoundErrorResponse();
+        }
+        return $this->processUserPictureUpload($users_id, $request);
+    }
+
+
     #[Route(path: '/User/{id}', methods: ['PATCH'], requirements: ['id' => '\d+'])]
     #[RouteVersion(introduced: '2.0')]
     #[Doc\UpdateRoute(schema_name: 'User')]
     public function updateUserByID(Request $request): Response
     {
-        return ResourceAccessor::updateBySchema($this->getKnownSchema('User', $this->getAPIVersion($request)), $request->getAttributes(), $request->getParameters());
+        $params = $request->getParameters();
+        $schema = $this->getKnownSchema('User', $this->getAPIVersion($request));
+        $attrs  = $request->getAttributes();
+
+        $items_id = (int) $attrs['id'];
+        $input    = ResourceAccessor::getInputParamsBySchema($schema, $params);
+        if (isset($params['emails']) && is_array($params['emails'])) {
+            $input = $this->injectUserEmailsIntoInput($params['emails'], $input, $items_id);
+        }
+        $input['id'] = $items_id;
+
+        $item = new User();
+        if (!$item->can($items_id, UPDATE, $input)) {
+            return self::getAccessDeniedErrorResponse();
+        }
+        $result = $item->update($input);
+        if ($result === false) {
+            return self::getCRUDErrorResponse(self::CRUD_ACTION_UPDATE);
+        }
+        return ResourceAccessor::getOneBySchema($schema, $attrs, $params);
     }
 
     #[Route(path: '/User/username/{username}', methods: ['PATCH'], requirements: ['username' => '[a-zA-Z0-9_]+'])]
@@ -1171,7 +1409,29 @@ EOT,
     #[Doc\UpdateRoute(schema_name: 'User')]
     public function updateUserByUsername(Request $request): Response
     {
-        return ResourceAccessor::updateBySchema($this->getKnownSchema('User', $this->getAPIVersion($request)), $request->getAttributes(), $request->getParameters(), 'username');
+        $params   = $request->getParameters();
+        $schema   = $this->getKnownSchema('User', $this->getAPIVersion($request));
+        $attrs    = $request->getAttributes();
+
+        $items_id = ResourceAccessor::getIDForOtherUniqueFieldBySchema($schema, 'username', $attrs['username']);
+        if ($items_id === null) {
+            return self::getNotFoundErrorResponse();
+        }
+        $input    = ResourceAccessor::getInputParamsBySchema($schema, $params);
+        if (isset($params['emails']) && is_array($params['emails'])) {
+            $input = $this->injectUserEmailsIntoInput($params['emails'], $input, $items_id);
+        }
+        $input['id'] = $items_id;
+
+        $item = new User();
+        if (!$item->can($items_id, UPDATE, $input)) {
+            return self::getAccessDeniedErrorResponse();
+        }
+        $result = $item->update($input);
+        if ($result === false) {
+            return self::getCRUDErrorResponse(self::CRUD_ACTION_UPDATE);
+        }
+        return ResourceAccessor::getOneBySchema($schema, $attrs + ['id' => $items_id], $params);
     }
 
     #[Route(path: '/User/{id}', methods: ['DELETE'], requirements: ['id' => '\d+'])]
@@ -1506,5 +1766,122 @@ EOT,
     {
         $itemtype = $request->getAttribute('itemtype');
         return ResourceAccessor::deleteBySchema($this->getKnownSchema($itemtype, $this->getAPIVersion($request)), $request->getAttributes(), $request->getParameters());
+    }
+
+    #[Route(path: '/User/{id}/Authorization', methods: ['GET'], requirements: ['id' => '\d+'], middlewares: [ResultFormatterMiddleware::class])]
+    #[RouteVersion(introduced: '2.2')]
+    #[Doc\Route(
+        description: 'Get authorizations (profile/entity assignments) for a user',
+        responses: [
+            new Doc\Response(new Doc\SchemaReference('UserAuthorization[]')),
+        ]
+    )]
+    public function getUserAuthorizations(Request $request): Response
+    {
+        global $DB;
+
+        $users_id = (int) $request->getAttribute('id');
+        $user = new User();
+        if (!$user->can($users_id, READ)) {
+            return self::getAccessDeniedErrorResponse();
+        }
+
+        $iterator = $DB->request([
+            'SELECT' => [
+                'pu.id',
+                'pu.profiles_id',
+                'p.name AS profile_name',
+                'pu.entities_id',
+                'e.completename AS entity_name',
+                'pu.is_recursive',
+                'pu.is_dynamic',
+            ],
+            'FROM'   => Profile_User::getTable() . ' AS pu',
+            'LEFT JOIN' => [
+                Profile::getTable() . ' AS p'  => ['FKEY' => ['pu' => 'profiles_id', 'p' => 'id']],
+                Entity::getTable()  . ' AS e'  => ['FKEY' => ['pu' => 'entities_id',  'e' => 'id']],
+            ],
+            'WHERE'  => ['pu.users_id' => $users_id],
+        ]);
+
+        $result = [];
+        foreach ($iterator as $row) {
+            $result[] = [
+                'id'           => (int)  $row['id'],
+                'profile'      => ['id' => (int) $row['profiles_id'], 'name' => $row['profile_name']],
+                'entity'       => ['id' => (int) $row['entities_id'],  'name' => $row['entity_name']],
+                'is_recursive' => (bool) $row['is_recursive'],
+                'is_dynamic'   => (bool) $row['is_dynamic'],
+            ];
+        }
+
+        return new JSONResponse($result);
+    }
+
+    #[Route(path: '/User/{id}/Authorization', methods: ['POST'], requirements: ['id' => '\d+'])]
+    #[RouteVersion(introduced: '2.2')]
+    #[Doc\Route(
+        description: 'Add an authorization (profile/entity assignment) to a user',
+        parameters: [
+            new Doc\Parameter(name: 'profiles_id', schema: new Doc\Schema(type: Doc\Schema::TYPE_INTEGER), location: Doc\Parameter::LOCATION_BODY, required: true, description: 'Profile ID'),
+            new Doc\Parameter(name: 'entities_id', schema: new Doc\Schema(type: Doc\Schema::TYPE_INTEGER), location: Doc\Parameter::LOCATION_BODY, required: true, description: 'Entity ID'),
+            new Doc\Parameter(name: 'is_recursive', schema: new Doc\Schema(type: Doc\Schema::TYPE_BOOLEAN, default: false), location: Doc\Parameter::LOCATION_BODY, description: 'Apply recursively to sub-entities'),
+        ],
+    )]
+    public function addUserAuthorization(Request $request): Response
+    {
+        $users_id    = (int) $request->getAttribute('id');
+        $profiles_id = (int) $request->getParameter('profiles_id');
+        $entities_id = (int) ($request->hasParameter('entities_id') ? $request->getParameter('entities_id') : 0);
+        $is_recursive = (bool) ($request->hasParameter('is_recursive') ? $request->getParameter('is_recursive') : false);
+
+        if ($profiles_id <= 0) {
+            return self::getInvalidParametersErrorResponse(['missing' => ['profiles_id']]);
+        }
+
+        $user = new User();
+        if (!$user->can($users_id, READ)) {
+            return self::getAccessDeniedErrorResponse();
+        }
+
+        $pu = new Profile_User();
+        $new_id = $pu->add([
+            'users_id'    => $users_id,
+            'profiles_id' => $profiles_id,
+            'entities_id' => $entities_id,
+            'is_recursive' => $is_recursive ? 1 : 0,
+            'is_dynamic'   => 0,
+        ]);
+
+        if ($new_id === false) {
+            return self::getCRUDErrorResponse(self::CRUD_ACTION_CREATE);
+        }
+
+        return self::getCRUDCreateResponse($new_id, self::getAPIPathForRouteFunction(self::class, 'getUserAuthorizations', ['id' => $users_id]));
+    }
+
+    #[Route(path: '/User/{id}/Authorization/{auth_id}', methods: ['DELETE'], requirements: ['id' => '\d+', 'auth_id' => '\d+'])]
+    #[RouteVersion(introduced: '2.2')]
+    #[Doc\Route(description: 'Remove an authorization from a user')]
+    public function deleteUserAuthorization(Request $request): Response
+    {
+        $users_id = (int) $request->getAttribute('id');
+        $auth_id  = (int) $request->getAttribute('auth_id');
+
+        $pu = new Profile_User();
+        if (!$pu->getFromDB($auth_id) || (int) $pu->fields['users_id'] !== $users_id) {
+            return self::getNotFoundErrorResponse();
+        }
+
+        if (!$pu->canPurgeItem()) {
+            return self::getAccessDeniedErrorResponse();
+        }
+
+        $result = $pu->delete(['id' => $auth_id], true);
+        if ($result === false) {
+            return self::getCRUDErrorResponse(self::CRUD_ACTION_DELETE);
+        }
+
+        return new JSONResponse(null, 204);
     }
 }

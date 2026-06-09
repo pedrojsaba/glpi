@@ -836,7 +836,7 @@ final class ITILController extends AbstractController
                 'requested_approver_type' => [
                     'type' => Doc\Schema::TYPE_STRING,
                     'x-field' => 'itemtype_target',
-                    'enum' => [User::class, Group::class],
+                    'enum' => [User::getType(), Group::getType()],
                 ],
                 'requested_approver_id' => [
                     'type' => Doc\Schema::TYPE_INTEGER,
@@ -1408,7 +1408,40 @@ EOT,
     public function getItem(Request $request): Response
     {
         $itemtype = $request->getAttribute('itemtype');
-        return ResourceAccessor::getOneBySchema($this->getKnownSchema($itemtype, $this->getAPIVersion($request)), $request->getAttributes(), $request->getParameters());
+        $response = ResourceAccessor::getOneBySchema(
+            $this->getKnownSchema($itemtype, $this->getAPIVersion($request)),
+            $request->getAttributes(),
+            $request->getParameters()
+        );
+
+        // For Ticket itemtype, append the IDs of linked projects.
+        if ($itemtype === 'Ticket' && $response->getStatusCode() === 200) {
+            /** @var \DBmysql $DB */
+            global $DB;
+
+            $ticketId   = (int) $request->getAttribute('id');
+            $projectIds = [];
+
+            $iterator = $DB->request([
+                'SELECT' => ['projects_id'],
+                'FROM'   => \Itil_Project::getTable(),
+                'WHERE'  => [
+                    'itemtype' => 'Ticket',
+                    'items_id' => $ticketId,
+                ],
+            ]);
+
+            foreach ($iterator as $row) {
+                $projectIds[] = (int) $row['projects_id'];
+            }
+
+            $data                = json_decode((string) $response->getBody(), true);
+            $data['project_ids'] = $projectIds;
+
+            return new JSONResponse($data, $response->getStatusCode());
+        }
+
+        return $response;
     }
 
     #[Route(path: '/{itemtype}', methods: ['POST'])]
@@ -1450,7 +1483,7 @@ EOT,
     private function getRequiredTimelineItemFields(CommonITILObject $item, Request $request, string $subitem_type): array
     {
         $fields = [
-            'itemtype' => $item::class,
+            'itemtype' => $item::getType(),
             'items_id' => $item->getID(),
         ];
         if ($subitem_type === 'Task' || $subitem_type === 'Validation') {
@@ -1727,7 +1760,7 @@ EOT,
         $schema = $this->getKnownSubitemSchema($item, $subitem_type, $this->getAPIVersion($request));
         return ResourceAccessor::createBySchema($schema, $parameters, [self::class, 'getTimelineItem'], [
             'mapped' => [
-                'itemtype' => $item::class,
+                'itemtype' => $item::getType(),
                 'subitem_type' => $subitem_type,
                 'id' => $item->getID(),
             ],
@@ -1751,7 +1784,7 @@ EOT,
         $schema = $this->getKnownSubitemSchema($item, 'Task', $this->getAPIVersion($request));
         return ResourceAccessor::createBySchema($schema, $parameters, [self::class, 'getTimelineTask'], [
             'mapped' => [
-                'itemtype' => $item::class,
+                'itemtype' => $item::getType(),
                 'subitem_type' => 'Task',
                 'id' => $item->getID(),
             ],
@@ -1777,7 +1810,7 @@ EOT,
         $schema = $this->getKnownSubitemSchema($item, 'Validation', $this->getAPIVersion($request));
         return ResourceAccessor::createBySchema($schema, $parameters, [self::class, 'getTimelineValidation'], [
             'mapped' => [
-                'itemtype' => $item::class,
+                'itemtype' => $item::getType(),
                 'subitem_type' => 'Validation',
                 'id' => $item->getID(),
             ],

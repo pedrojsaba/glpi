@@ -223,6 +223,14 @@ final class ResourceAccessor
         }
         $input = self::getInputParamsBySchema($schema, $request_params);
 
+        // Pass through file-upload parameters filtered out by getInputParamsBySchema
+        // (they are not schema properties but Document::prepareInputForAdd requires them)
+        foreach (['_filename', '_prefix_filename', '_tag_filename'] as $upload_param) {
+            if (isset($request_params[$upload_param])) {
+                $input[$upload_param] = $request_params[$upload_param];
+            }
+        }
+
         $item = self::getItemFromSchema($schema);
         if (!$item->can($item->getID(), CREATE, $input)) {
             return AbstractController::getAccessDeniedErrorResponse();

@@ -58,6 +58,7 @@ final class RoutePath
 {
     /**
      * The Route attribute
+     * @var Route|null
      */
     private ?Route $route = null;
 
@@ -66,16 +67,21 @@ final class RoutePath
      */
     private ?ReflectionClass $controller = null;
 
+    /**
+     * @var ReflectionMethod|null
+     */
     private ?ReflectionMethod $method = null;
 
     /**
      * The relative URI path with placeholder requirements inlined
+     * @var string|null
      */
     private ?string $compiled_path;
 
     /**
      * Key used to identify the controller and method this route is linked to.
      * Used for hydration.
+     * @var string
      */
     private string $key;
 
@@ -102,7 +108,7 @@ final class RoutePath
     /**
      * @var AbstractController|null The controller instance
      */
-    private ?AbstractController $controller_instance = null;
+    private $controller_instance;
 
     /**
      * @param class-string<AbstractController> $class

@@ -375,6 +375,17 @@ final class ManagementController extends AbstractController
         ];
         $schemas['Document']['properties']['mime'] = ['type' => Doc\Schema::TYPE_STRING];
         $schemas['Document']['properties']['sha1sum'] = ['type' => Doc\Schema::TYPE_STRING];
+        // itemtype/items_id are write-only on creation: Document::post_addItem() uses them
+        // to auto-create the Document_Item link, so they must survive getInputParamsBySchema.
+        $schemas['Document']['properties']['itemtype'] = [
+            'type'       => Doc\Schema::TYPE_STRING,
+            'x-internal' => true,
+        ];
+        $schemas['Document']['properties']['items_id'] = [
+            'type'   => Doc\Schema::TYPE_INTEGER,
+            'format' => Doc\Schema::FORMAT_INTEGER_INT64,
+            'x-internal' => true,
+        ];
         $schemas['Document_Item'] = [
             'x-version-introduced' => '2.0',
             'type' => Doc\Schema::TYPE_OBJECT,
