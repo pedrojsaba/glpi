@@ -1626,7 +1626,40 @@ EOT,
     public function getItem(Request $request): Response
     {
         $itemtype = $request->getAttribute('itemtype');
-        return ResourceAccessor::getOneBySchema($this->getKnownSchema($itemtype, $this->getAPIVersion($request)), $request->getAttributes(), $request->getParameters());
+        $response = ResourceAccessor::getOneBySchema(
+            $this->getKnownSchema($itemtype, $this->getAPIVersion($request)),
+            $request->getAttributes(),
+            $request->getParameters()
+        );
+
+        // For Ticket itemtype, append the IDs of linked projects.
+        if ($itemtype === 'Ticket' && $response->getStatusCode() === 200) {
+            /** @var \DBmysql $DB */
+            global $DB;
+
+            $ticketId   = (int) $request->getAttribute('id');
+            $projectIds = [];
+
+            $iterator = $DB->request([
+                'SELECT' => ['projects_id'],
+                'FROM'   => \Itil_Project::getTable(),
+                'WHERE'  => [
+                    'itemtype' => 'Ticket',
+                    'items_id' => $ticketId,
+                ],
+            ]);
+
+            foreach ($iterator as $row) {
+                $projectIds[] = (int) $row['projects_id'];
+            }
+
+            $data                = json_decode((string) $response->getBody(), true);
+            $data['project_ids'] = $projectIds;
+
+            return new JSONResponse($data, $response->getStatusCode());
+        }
+
+        return $response;
     }
 
     #[Route(path: '/{itemtype}', methods: ['POST'])]
